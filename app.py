@@ -1,5 +1,6 @@
 import os
 import base64
+import requests
 import traceback
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -34,43 +35,43 @@ def text_to_speech():
             app.logger.error("DASHSCOPE_API_KEY 未设置")
             return jsonify({'error': 'Server configuration error'}), 500
 
-        # 截断过长的文本（阿里云限制约 150 字符）
+        # 截断过长文本
         if len(text) > 150:
             text = text[:150]
 
         app.logger.info(f"📤 文本: {text[:50]}... 音色: {voice}")
 
-        # 调用 Qwen-TTS（流式模式）
+        # 非流式调用，获取音频 URL
         response = dashscope.MultiModalConversation.call(
             model="qwen3-tts-flash",
             text=text,
             voice=voice,
             language_type="English",
-            stream=True  # 关键：流式模式
+            stream=False  # 非流式
         )
 
-        # 收集音频数据
-        audio_data = b''
-        for chunk in response:
-            # 兼容不同版本的返回结构
-            if hasattr(chunk, 'output') and chunk.output and hasattr(chunk.output, 'audio'):
-                audio_data += chunk.output.audio
-            elif hasattr(chunk, 'audio'):
-                audio_data += chunk.audio
-            else:
-                # 尝试直接取
-                try:
-                    audio_data += chunk['output']['audio']
-                except (KeyError, TypeError):
-                    pass
+        # 提取音频 URL
+        audio_url = response.output.audio.url
+        if not audio_url:
+            app.logger.error("❌ 未获取到音频 URL")
+            return jsonify({'error': 'No audio URL returned'}), 500
 
-        if not audio_data:
-            app.logger.error("❌ 未接收到音频数据")
-            return jsonify({'error': 'No audio data received'}), 500
+        app.logger.info(f"✅ 获取音频 URL: {audio_url}")
 
+        # 从 OSS 下载音频二进制数据（后端下载，避免跨域）
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://dashscope.aliyuncs.com/'
+        }
+        audio_resp = requests.get(audio_url, headers=headers, timeout=30)
+        if audio_resp.status_code != 200:
+            app.logger.error(f"❌ 下载音频失败: {audio_resp.status_code}")
+            return jsonify({'error': 'Failed to download audio'}), 500
+
+        audio_data = audio_resp.content
         # 编码为 base64
         audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-        app.logger.info(f"✅ 音频生成成功，大小: {len(audio_data)} 字节")
+        app.logger.info(f"✅ 音频下载成功，大小: {len(audio_data)} 字节")
 
         return jsonify({
             'audio_base64': audio_base64,
